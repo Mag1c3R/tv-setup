@@ -1,0 +1,551 @@
+diff --git a/launcher/app/src/main/AndroidManifest.xml b/launcher/app/src/main/AndroidManifest.xml
+index b336792..5fc4ab2 100644
+--- a/launcher/app/src/main/AndroidManifest.xml
++++ b/launcher/app/src/main/AndroidManifest.xml
+@@ -21,6 +21,8 @@
+     <!-- YaOS (Yandex TV OS): HDMI, AV and the tuner all play in com.yandex.tv.live, whose activities require
+          this permission (protection level normal, so it is granted at install). Ignored on other TVs. -->
+     <uses-permission android:name="yandex.tv.permission.ACCESS_TV_SOURCE" />
++    <!-- The tile menu's Uninstall row: Android's own uninstall dialog, which asks before anything is removed. -->
++    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+ 
+     <!-- Android 11+ package visibility: lets the launcher list the TV apps it shows as tiles, and the
+          apps that declare a module card (docs/specs/card.md). -->
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/ClockScene.java b/launcher/app/src/main/java/com/gathin/tvhome/ClockScene.java
+index dcae93a..7bd992e 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/ClockScene.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/ClockScene.java
+@@ -75,6 +75,12 @@ final class ClockScene {
+     /** root is the inflated dream_clock layout. */
+     ClockScene(View root) {
+         content = root.findViewById(R.id.dreamContent);
++        // In 24-hour time the AM/PM clock is empty but its margin still widens the row, which pulls the centred date
++        // off the digits' centre.
++        View amPm = root.findViewById(R.id.dreamAmPm);
++        if (amPm != null && ClockFormat.is24(root.getContext(), Config.load(root.getContext()).clockFormat)) {
++            amPm.setVisibility(View.GONE);
++        }
+         ambient = root.findViewById(R.id.dreamAmbient);
+         glow = new GradientDrawable();
+         glow.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+@@ -141,8 +147,9 @@ final class ClockScene {
+             rotationMs = cfg.wallpaperRotationMinutes * 60_000L;
+             order = cfg.wallpaperOrder;
+             moods = cfg.wallpaperMoods;
+-            latitude = moods.isEmpty() ? "" : ctx.getString(R.string.latitude);
+-            longitude = moods.isEmpty() ? "" : ctx.getString(R.string.longitude);
++            String[] place = Config.place(ctx);
++            latitude = moods.isEmpty() ? "" : place[0];
++            longitude = moods.isEmpty() ? "" : place[1];
+         }
+         wallpaperShade = (cfg.clockWallpaperDim * 255 / 100) << 24;
+         wallpaperRes = ctx.getResources();
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Config.java b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
+index 86ccef2..26e9efd 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/Config.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
+@@ -44,6 +44,15 @@ final class Config {
+     static final String WALLPAPER_CHOICE_KEY = "wallpaper_choice";
+     static final String DOCK_OPACITY_KEY = "dock_opacity";
+     static final String CLOCK_FORMAT_KEY = "clock_format";
++
++    /** Launcher settings: the TV channels row in the Inputs menu; config.xml live_tv_in_inputs until set on the TV. */
++    static final String LIVE_TV_IN_INPUTS_KEY = "live_tv_in_inputs";
++
++    static boolean liveTvInInputs(android.content.Context ctx) {
++        return ctx.getSharedPreferences(SETTINGS_NAME, android.content.Context.MODE_PRIVATE)
++                .getBoolean(LIVE_TV_IN_INPUTS_KEY, ctx.getResources().getBoolean(R.bool.live_tv_in_inputs));
++    }
++
+     /**
+      * Counts the changes made in Launcher settings. Home remembers the count it was built with and rebuilds on
+      * resume when it differs, however the settings were left (see MainActivity#onResume).
+@@ -773,6 +782,20 @@ final class Config {
+         }
+     }
+ 
++    /**
++     * Where the TV is, as {latitude, longitude}: config.json's "latitude" and "longitude" (numbers or text, read from
++     * the copy load() keeps) over config.xml's. An installer can set the place without rebuilding the launcher.
++     */
++    static String[] place(Context ctx) {
++        String lat = ctx.getString(R.string.latitude), lon = ctx.getString(R.string.longitude);
++        JSONObject json = read(new File(ctx.getFilesDir(), FILE_NAME));
++        if (json != null) {
++            lat = json.optString("latitude", lat);
++            lon = json.optString("longitude", lon);
++        }
++        return new String[]{lat.trim(), lon.trim()};
++    }
++
+     /** Reads and parses the overlay; any problem means "no overlay", never a crash on the home screen. */
+     /**
+      * The overlay, or before external storage is mounted, the copy kept from the last time it was read. Home can
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/LauncherSettingsActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/LauncherSettingsActivity.java
+index 5df0a51..9af3d30 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/LauncherSettingsActivity.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/LauncherSettingsActivity.java
+@@ -36,6 +36,7 @@ public final class LauncherSettingsActivity extends Activity {
+     private final TextView[] clockChoices = new TextView[CLOCK_FORMATS.length];
+     private TextView wallpaperChoice;
+     private TextView animationsChoice;
++    private TextView liveTvChoice;
+     private TextView advancedChoice;
+     private TextView followThemeChoice;
+     private TextView openOnStartChoice;
+@@ -134,6 +135,11 @@ public final class LauncherSettingsActivity extends Activity {
+             changed();
+             refresh();
+         });
++        liveTvChoice = findViewById(R.id.liveTvChoice);
++        liveTvChoice.setOnClickListener(v -> {
++            choices.edit().putBoolean(Config.LIVE_TV_IN_INPUTS_KEY, !Config.liveTvInInputs(this)).apply();
++            refresh();
++        });
+         advancedChoice = findViewById(R.id.advancedChoice);
+         advancedChoice.setOnClickListener(v -> {
+             if (advancedEffects) {
+@@ -312,6 +318,8 @@ public final class LauncherSettingsActivity extends Activity {
+         advancedChoice.setText(getString(R.string.advanced_effects_state,
+                 getString(advancedEffects ? R.string.on : R.string.off)));
+         advancedChoice.setEnabled(animations);
++        liveTvChoice.setText(getString(R.string.live_tv_in_inputs_state,
++                getString(Config.liveTvInInputs(this) ? R.string.on : R.string.off)));
+         advancedChoice.setAlpha(animations ? 1f : 0.5f);
+         String wallpaperCurrent = choices.getString(Config.WALLPAPER_CHOICE_KEY, null);
+         wallpaperChoice.setText(getString(R.string.wallpaper_state,
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+index c4993b9..f747dc9 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+@@ -558,6 +558,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         if (lunar) lunarDate.setVisibility(View.VISIBLE);
+         greetingName = cfg.greetingName;
+         if (cfg.dateBelowClock) moveDateBelowClock();
++        alignHeaderToClock();
++        // No line between the clock and the date beside it, and the date close to the clock: the line's 16dp margins on
++        // both sides become one 12dp gap.
++        View divider = findViewById(R.id.clockDivider);
++        if (divider.getVisibility() == View.VISIBLE) {
++            ViewGroup.MarginLayoutParams dividerLp = (ViewGroup.MarginLayoutParams) divider.getLayoutParams();
++            dividerLp.width = 0;
++            dividerLp.setMarginStart(Math.round(12 * density));
++            dividerLp.setMarginEnd(0);
++            divider.setLayoutParams(dividerLp);
++            divider.setVisibility(View.INVISIBLE);
++        }
+         if (shamsi) {
+             shamsiDate.setVisibility(View.VISIBLE);
+             TextView date = findViewById(R.id.date);
+@@ -2429,6 +2441,56 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             textLp.gravity = ((TextView) text).getGravity() & Gravity.HORIZONTAL_GRAVITY_MASK;
+             text.setLayoutParams(textLp);
+         }
++        if (!getResources().getBoolean(R.bool.rtl_menu_bar)) {
++            // Weekday and date centred under the clock's digits, each line on its own centre.
++            for (int i = 0; i < texts.getChildCount(); i++) {
++                TextView text = (TextView) texts.getChildAt(i);
++                text.setGravity(Gravity.CENTER_HORIZONTAL);
++                LinearLayout.LayoutParams textLp = (LinearLayout.LayoutParams) text.getLayoutParams();
++                textLp.gravity = Gravity.CENTER_HORIZONTAL;
++                text.setLayoutParams(textLp);
++            }
++            View clock = findViewById(R.id.clock);
++            View.OnLayoutChangeListener center = (v, l, t, r, b, ol, ot, or, ob) -> column.setTranslationX(
++                    clockRow.getLeft() + clock.getLeft() + clock.getWidth() / 2f - column.getWidth() / 2f - column.getLeft());
++            clock.addOnLayoutChangeListener(center);
++            column.addOnLayoutChangeListener(center);
++        }
++    }
++
++    /**
++     * The greeting centred over the clock's digits, and the top buttons centred on the digits' height (not the clock
++     * view's, which has the font's padding above them) instead of on the header's bottom line, with the date beside
++     * the clock or below it.
++     */
++    private void alignHeaderToClock() {
++        if (getResources().getBoolean(R.bool.rtl_menu_bar)) return;
++        TextView clock = findViewById(R.id.clock);
++        View clockRow = (View) clock.getParent();
++        // Its own width, so "ДОБРЫЙ ВЕЧЕР" and "ДОБРОЕ УТРО" each sit centred.
++        TextView greetingLine = findViewById(R.id.greeting);
++        ViewGroup.LayoutParams greetingLp = greetingLine.getLayoutParams();
++        greetingLp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
++        greetingLine.setLayoutParams(greetingLp);
++        View.OnLayoutChangeListener center = (v, l, t, r, b, ol, ot, or, ob) -> greetingLine.setTranslationX(
++                clockRow.getLeft() + clock.getLeft() + clock.getWidth() / 2f - greetingLine.getWidth() / 2f
++                        - greetingLine.getLeft());
++        clock.addOnLayoutChangeListener(center);
++        greetingLine.addOnLayoutChangeListener(center);
++        View buttons = findViewById(R.id.topButtons);
++        RelativeLayout.LayoutParams buttonsLp = (RelativeLayout.LayoutParams) buttons.getLayoutParams();
++        buttonsLp.removeRule(RelativeLayout.ALIGN_BOTTOM);
++        buttonsLp.addRule(RelativeLayout.ALIGN_TOP, R.id.leftBlock);
++        buttonsLp.bottomMargin = 0;
++        buttons.setLayoutParams(buttonsLp);
++        View header = findViewById(R.id.leftBlock);
++        android.graphics.Rect digit = new android.graphics.Rect();
++        buttons.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
++            clock.getPaint().getTextBounds("0", 0, 1, digit);
++            int top = clock.getBaseline() + digit.top;
++            for (View view = clock; view != header && view != null; view = (View) view.getParent()) top += view.getTop();
++            v.setTranslationY(top + (digit.height() - v.getHeight()) / 2f);   // centred on the digits
++        });
+     }
+ 
+     /** The first top-bar button after Inputs that is shown, in bar order (top_bar_apps, the network pill, ...); Settings is always there. */
+@@ -3360,13 +3422,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+                     // Settings > Inputs), then the port. Opening the device's input also makes it the CEC
+                     // active source, which wakes it.
+                     for (TvInputInfo device : devices) {
++                        // The device's own CEC name ("PlayStation 5") before the port's: a port label picked from
++                        // the TV's list ("Blu-ray") says less than what is actually plugged in.
+                         CharSequence name = InputNames.tidy(device.loadCustomLabel(this));
+-                        if (name == null || name.length() == 0) name = named ? custom : device.loadLabel(this);
++                        if (name == null || name.length() == 0) name = InputNames.tidy(device.loadLabel(this));
++                        if (name == null || name.length() == 0 || name.toString().equals(label)) name = named ? custom : null;
+                         String deviceLabel = name == null || name.length() == 0 ? label : name + " \u00B7 " + label;
+                         final String deviceId = device.getId();
+                         int state = hdmiStateBogus ? -1 : tim.getInputState(deviceId);
+                         View row = addInputRow(rows, popup, R.drawable.ic_input, deviceLabel, state, () -> openInput(deviceId));
+-                        if (connectedOnly && InputFold.folds(true, state)) fold(row, folded);
++                        // A device that answers CEC is plugged in even while asleep: only a gone one folds.
++                        if (connectedOnly && state == TvInputManager.INPUT_STATE_DISCONNECTED) fold(row, folded);
+                     }
+                     continue;
+                 }
+@@ -3437,7 +3503,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+                         : tuned;
+             }
+         }
+-        if (liveTv != null) {
++        if (liveTv != null && Config.liveTvInInputs(this)) {
+             if (rows.getChildCount() > 0) addSeparator(rows);
+             final Intent liveTvIntent = liveTv;
+             addInputRow(rows, popup, R.drawable.ic_livetv, getString(R.string.live_tv), -1, () -> open(liveTvIntent));
+@@ -3572,6 +3638,23 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+                 if (vendor != null) open(vendor);
+             });
+         }
++        // settings_menu_apps (config.xml): tools kept off Home, opened from here ("package=Name"). Missing apps are skipped.
++        for (String entry : getResources().getStringArray(R.array.settings_menu_apps)) {
++            int eq = entry.indexOf('=');
++            String pkg = (eq < 0 ? entry : entry.substring(0, eq)).trim();
++            Intent launch = getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
++            if (launch == null) launch = getPackageManager().getLaunchIntentForPackage(pkg);
++            if (launch == null) continue;
++            final Intent app = launch;
++            CharSequence name = eq >= 0 ? entry.substring(eq + 1).trim() : pkg;
++            if (eq < 0) {
++                try {
++                    name = getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg, 0));
++                } catch (PackageManager.NameNotFoundException ignored) {
++                }
++            }
++            addSettingsMenuRow(rows, popup, name, () -> open(app));
++        }
+         if (moduleCards) addSettingsMenuRow(rows, popup, R.string.module_cards, this::showModuleCards);
+         if (dockRow) addSettingsMenuRow(rows, popup, R.string.dock_edit, this::startDockEdit);
+         addSettingsMenuRow(rows, popup, R.string.reorder, this::toggleReorder);
+@@ -3679,6 +3762,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         onTileLongPress(position, card);
+     }
+ 
++    private boolean isUserApp(String pkg) {
++        try {
++            return (getPackageManager().getApplicationInfo(pkg, 0).flags & ApplicationInfo.FLAG_SYSTEM) == 0;
++        } catch (PackageManager.NameNotFoundException e) {
++            return false;
++        }
++    }
++
+     @Override
+     public void onTileLongPress(int position, View card) {
+         if (reordering || openPopup != null) return;
+@@ -3709,6 +3800,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         // Some firmware has no App info page at all; a row that only toasts "can't open" helps nobody.
+         Intent info = SystemSettings.appInfo(this, pkg);
+         if (info != null) addSettingsMenuRow(rows, popup, R.string.library_app_info, () -> open(info));
++        // Apps the owner installed only: a system app cannot be removed, and its dialog would offer to drop its updates.
++        if (isUserApp(pkg)) addSettingsMenuRow(rows, popup, R.string.tile_uninstall,
++                () -> open(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + pkg))));
+         panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+         popup.setWidth(Math.max((int) (200 * density), panel.getMeasuredWidth()));
+         // Dock tiles sit near the bottom of the screen: open the menu above the tile when it would not fit below.
+@@ -3730,6 +3824,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     }
+ 
+     private void addSettingsMenuRow(LinearLayout rows, PopupWindow popup, int title, Runnable action) {
++        addSettingsMenuRow(rows, popup, getString(title), action);
++    }
++
++    private void addSettingsMenuRow(LinearLayout rows, PopupWindow popup, CharSequence title, Runnable action) {
+         View row = getLayoutInflater().inflate(R.layout.item_input, rows, false);
+         row.findViewById(R.id.icon).setVisibility(View.GONE);
+         row.findViewById(R.id.dot).setVisibility(View.GONE);
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/SkyView.java b/launcher/app/src/main/java/com/gathin/tvhome/SkyView.java
+index 96be4f7..199d9fd 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/SkyView.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/SkyView.java
+@@ -44,6 +44,8 @@ public class SkyView extends View {
+     private int lastMinute = -1;
+     private Bitmap texture;
+     private BitmapDrawable drawable;
++    /** Config.place, read once: config.json only changes with a theme push, which restarts Home. */
++    private String[] place;
+ 
+     public SkyView(Context context, @Nullable AttributeSet attrs) {
+         super(context, attrs);
+@@ -72,8 +74,8 @@ public class SkyView extends View {
+     /** Today's sunrise and sunset at the configured place, or null without one (fixed reference day). */
+     @Nullable
+     private int[] sunTimes() {
+-        String lat = getContext().getString(R.string.latitude);
+-        String lon = getContext().getString(R.string.longitude);
++        if (place == null) place = Config.place(getContext());
++        String lat = place[0], lon = place[1];
+         if (lat.isEmpty() || lon.isEmpty()) return null;
+         try {
+             return Sun.riseAndSet(LocalDate.now(), Double.parseDouble(lat), Double.parseDouble(lon),
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/WallpaperPlayer.java b/launcher/app/src/main/java/com/gathin/tvhome/WallpaperPlayer.java
+index 8da8dfa..f94eeb1 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/WallpaperPlayer.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/WallpaperPlayer.java
+@@ -73,8 +73,9 @@ final class WallpaperPlayer {
+         order = config.wallpaperOrder;
+         preferences = context.getSharedPreferences("wallpaper_rotation", Context.MODE_PRIVATE);
+         moods = config.wallpaperMoods;
+-        latitude = moods.isEmpty() ? "" : context.getString(R.string.latitude);
+-        longitude = moods.isEmpty() ? "" : context.getString(R.string.longitude);
++        String[] place = Config.place(context);
++        latitude = moods.isEmpty() ? "" : place[0];
++        longitude = moods.isEmpty() ? "" : place[1];
+         // Playback state belongs to one collection. Changing the collection starts from its first
+         // picture instead of resuming a filename that belonged to the previous one.
+         String collection = collectionKey(files);
+diff --git a/launcher/app/src/main/res/layout/activity_launcher_settings.xml b/launcher/app/src/main/res/layout/activity_launcher_settings.xml
+index 601a7de..86e0e4b 100644
+--- a/launcher/app/src/main/res/layout/activity_launcher_settings.xml
++++ b/launcher/app/src/main/res/layout/activity_launcher_settings.xml
+@@ -130,6 +130,11 @@
+             android:textColor="#FFACB8C1"
+             android:textSize="14sp" />
+ 
++        <TextView
++            android:id="@+id/liveTvChoice"
++            style="@style/SettingsRow"
++            android:layout_marginTop="28dp" />
++
+         <TextView
+             android:id="@+id/openOnStartChoice"
+             style="@style/SettingsRow"
+diff --git a/launcher/app/src/main/res/layout/activity_main.xml b/launcher/app/src/main/res/layout/activity_main.xml
+index 70c6de3..34d3894 100644
+--- a/launcher/app/src/main/res/layout/activity_main.xml
++++ b/launcher/app/src/main/res/layout/activity_main.xml
+@@ -272,7 +272,7 @@
+                             android:layout_height="wrap_content"
+                             android:singleLine="@bool/date_single_line"
+                             android:maxLines="2"
+-                            android:lineSpacingExtra="6dp"
++                            android:lineSpacingExtra="9dp"
+                             android:ellipsize="end"
+                             android:format12Hour="@string/date_format_home"
+                             android:format24Hour="@string/date_format_home"
+diff --git a/launcher/app/src/main/res/layout/dream_clock.xml b/launcher/app/src/main/res/layout/dream_clock.xml
+index b059bfa..e11fced 100644
+--- a/launcher/app/src/main/res/layout/dream_clock.xml
++++ b/launcher/app/src/main/res/layout/dream_clock.xml
+@@ -17,6 +17,7 @@
+         android:id="@+id/dreamContent"
+         android:layout_width="wrap_content"
+         android:layout_height="wrap_content"
++        android:gravity="center_horizontal"
+         android:orientation="vertical">
+ 
+         <LinearLayout
+@@ -37,6 +38,7 @@
+                 android:includeFontPadding="false" />
+ 
+             <TextClock
++                android:id="@+id/dreamAmPm"
+                 android:layout_width="wrap_content"
+                 android:layout_height="wrap_content"
+                 android:layout_marginStart="10dp"
+@@ -49,13 +51,15 @@
+                 android:textAllCaps="true" />
+         </LinearLayout>
+ 
++        <!-- Home's date (date_format_home: "EEEE\nd MMMM" in Russian), each line centred under the clock as on Home. -->
+         <TextClock
+             android:layout_width="wrap_content"
+             android:layout_height="wrap_content"
+-            android:layout_marginStart="6dp"
+             android:layout_marginTop="4dp"
+-            android:format12Hour="@string/date_format"
+-            android:format24Hour="@string/date_format"
++            android:gravity="center_horizontal"
++            android:lineSpacingExtra="6dp"
++            android:format12Hour="@string/date_format_home"
++            android:format24Hour="@string/date_format_home"
+             android:textColor="#8CFFFFFF"
+             android:textSize="18sp"
+             android:fontFamily="@string/font_regular"
+diff --git a/launcher/app/src/main/res/values-ru/strings.xml b/launcher/app/src/main/res/values-ru/strings.xml
+index a58dfe7..3e87a90 100644
+--- a/launcher/app/src/main/res/values-ru/strings.xml
++++ b/launcher/app/src/main/res/values-ru/strings.xml
+@@ -79,6 +79,7 @@
+     <string name="wallpaper_applied">Обои изменены</string>
+     <string name="wallpaper_theme_default">Как в теме</string>
+     <string name="animations_state">Анимация: %1$s</string>
++    <string name="live_tv_in_inputs_state">Телеканалы в «Источниках»: %1$s</string>
+     <string name="advanced_effects">Расширенные эффекты</string>
+     <string name="advanced_effects_state">Расширенные эффекты: %1$s</string>
+     <string name="open_on_start_label">Открывать при запуске</string>
+@@ -112,6 +113,7 @@
+     <string name="library_remove_shortcut">Убрать с главного экрана</string>
+     <string name="library_open">Открыть</string>
+     <string name="library_app_info">О приложении</string>
++    <string name="tile_uninstall">Удалить</string>
+     <string name="library_save_failed">Не удалось сохранить ярлык</string>
+     <string name="library_recent">Новое · Добавить на главный экран</string>
+     <string name="library_hint_add">Нажать: добавить на главный экран · Удержать: опции</string>
+diff --git a/launcher/app/src/main/res/values/config.xml b/launcher/app/src/main/res/values/config.xml
+index 42b73d7..2487c81 100644
+--- a/launcher/app/src/main/res/values/config.xml
++++ b/launcher/app/src/main/res/values/config.xml
+@@ -17,24 +17,38 @@
+ 
+     <!-- Apps pinned to the dock row at the bottom, in this order. Missing apps are skipped. -->
+     <string-array name="dock_apps">
+-        <item>com.netflix.ninja</item>
+-        <item>com.amazon.amazonvideo.livingroom</item>
++        <item>ru.kinopoisk.tv</item>
+         <item>com.google.android.youtube.tv</item>
+-        <item>in.startv.hotstar</item>
++        <item>com.vk.tv</item>
++        <item>ru.rutube.app</item>
+     </string-array>
+     <!-- With fewer dock_apps than columns (or a dock app that is not installed), the free dock slots take
+          the first grid apps, so the dock never shows a gap. false leaves them empty (#162); a theme can
+          set "fill_dock": false. -->
+     <bool name="fill_dock">true</bool>
+ 
++    <!-- Apps opened from the Settings button's menu (hold OK on Settings) instead of a tile, "package=Name", in this
++         order. Put them in hidden_apps too to keep them off Home. Missing apps are skipped. -->
++    <string-array name="settings_menu_apps" translatable="false">
++        <item>com.esaba.downloader=Загрузчик файлов</item>
++    </string-array>
++
+     <!-- Apps never shown as tiles (e.g. the Live TV app, which the Inputs menu already covers). -->
+     <string-array name="hidden_apps">
+         <item>com.mediatek.wwtv.tvcenter</item>
+-        <item>com.mitv.gallery</item>
++        <item>su.happ.proxyutility</item>
++        <item>com.haier.emanualatv</item>
++        <item>ru.haier.evo</item>
++        <item>io.github.jqssun.airplay</item>
++        <item>com.esaba.downloader</item>
++        <item>com.cybercat.adbappcontrol.tv</item>
+     </string-array>
+ 
+     <!-- The TV's Live TV / tuner app, offered at the end of the Inputs menu. Leave empty to omit. -->
+     <string name="live_tv_package" translatable="false">com.mediatek.wwtv.tvcenter</string>
++    <!-- The Live TV row ("TV channels") at the end of the Inputs menu. Launcher settings has an on/off row for it that
++         overrides this default on the TV. -->
++    <bool name="live_tv_in_inputs">false</bool>
+ 
+     <!-- Open the Live TV app above the first time Home comes up after the TV is switched on, for sets that are
+          mostly used for broadcast TV. Once per boot: Home after that stays Home. Can also be set with
+@@ -260,14 +274,14 @@
+     <!-- A name after the greeting: "Mr. Trịnh" shows GOOD MORNING, MR. TRỊNH. Empty: the greeting alone. -->
+     <string name="greeting_name" translatable="false"></string>
+     <!-- The greeting above the clock ("Good evening"). false hides it. Can also be set with "show_greeting" in a theme. -->
+-    <bool name="show_greeting">true</bool>
++    <bool name="show_greeting">false</bool>
+     <!-- The date and the line between the clock and the date in the clock's full white instead of dimmed. Can also be
+          set with "header_white" in a theme. -->
+     <bool name="header_white">false</bool>
+     <!-- Optional VPN app the network pill opens (hold the pill for Wi-Fi settings), e.g. the package of the
+          VPN you use. Empty: the pill opens Wi-Fi settings. The green VPN badge shows for any VPN either way;
+          with an app set here, a red "VPN off" badge also shows while no VPN is up. -->
+-    <string name="vpn_app" translatable="false"></string>
++    <string name="vpn_app" translatable="false">su.happ.proxyutility</string>
+     <!-- The VPN as its own pill after the network pill, instead of a badge inside it: solid green with a lock while a
+          VPN is up, solid red "VPN off" while none is and vpn_app is installed. Pressing it opens vpn_app (without it,
+          the App library, or VPN settings when app_library is off), and the network pill then always opens Wi-Fi
+@@ -275,7 +289,7 @@
+          label with icon_only_buttons, since the red state has no icon. A VPN app's kill switch keeps a VPN up while
+          the app says disconnected (it holds the tunnel to block traffic), so the pill stays green then. Can also be
+          set with "vpn_pill" in a theme. -->
+-    <bool name="vpn_pill">false</bool>
++    <bool name="vpn_pill">true</bool>
+     <!-- The dock as its own row: a lighter band, no names under the tiles, parked low on the screen with the top
+          shelf above it. false makes the dock apps simply the first tiles of one plain grid (still in dock_apps
+          order, no empty slots), with names under every tile and the glow behind every focused tile. -->
+@@ -352,7 +366,7 @@
+          sleeping device has) and the AV jacks fold behind a "More inputs" row that expands the rest. An HDMI row
+          whose state the TV cannot be trusted with stays. Off by default: every input is listed. Can also be set
+          with "inputs_connected_only" in a theme. -->
+-    <bool name="inputs_connected_only">false</bool>
++    <bool name="inputs_connected_only">true</bool>
+     <!-- Names under every tile, not only the focused one: unfocused names stay dimmed, the focused one is full white.
+          With dock_row the band grows down to hold the dock's names too. -->
+     <bool name="always_show_names">false</bool>
+@@ -373,7 +387,7 @@
+     <!-- Hold OK on a tile opens a small menu: Move (picks the tile up for reordering), Remove from Home (only with
+          app_library) and App info. false keeps the old behaviour: holding OK opens the app's App info page.
+          Can also be set with "tile_menu": true in a theme's config.json. -->
+-    <bool name="tile_menu">false</bool>
++    <bool name="tile_menu">true</bool>
+ 
+     <!-- Grid rows left visible under the dock on the home screen. 0 = dock sits at the very bottom. Tiles shrink if
+          the dock, its title and this many rows would not otherwise fit the screen height. -->
+@@ -385,7 +399,7 @@
+ 
+     <!-- Tiles per row in the grid; the dock always has this many slots. Tiles are 180dp wide at 4 columns and
+          shrink to fit from 5 up (about 144dp at 5, 117dp at 6 on a 1080p TV). -->
+-    <integer name="columns">4</integer>
++    <integer name="columns">5</integer>
+ 
+     <!-- Basic motion is on; advanced effects are opt-in in the launcher's own Settings screen. -->
+     <bool name="animations">true</bool>
+@@ -456,7 +470,7 @@
+          horizon glow around sunrise and sunset. 0 keeps the plain background (the default); 1 to 100
+          sets its opacity. Around 60 reads clearly without hiding a wallpaper. Can also be set with
+          "sky_intensity": 60 in a theme's config.json. -->
+-    <integer name="sky_intensity">0</integer>
++    <integer name="sky_intensity">60</integer>
+     <!-- Where the TV is, in decimal degrees, so the sky's sunrise and sunset glows follow the real sun
+          (computed on the TV, no network). Empty: a fixed temperate day, sunset glow around 19:00.
+          Vilnius: 54.69 and 25.28. -->
+@@ -485,7 +499,7 @@
+     <!-- The glow behind the dock in the focused app's colour (red for YouTube, blue for Prime Video). false keeps
+          only background_color or the wallpaper behind everything. Can also be set with "ambient_glow": false in a
+          theme's config.json. -->
+-    <bool name="ambient_glow">true</bool>
++    <bool name="ambient_glow">false</bool>
+     <!-- The focus highlight glows in the focused app's colour on every tile, as the cinematic shelf does for the
+          dock, without cinematic_home. Can also be set with "app_glow": true in a theme's config.json. -->
+     <bool name="app_glow">false</bool>
+diff --git a/launcher/app/src/main/res/values/strings.xml b/launcher/app/src/main/res/values/strings.xml
+index 2b2b53e..2aeef7e 100644
+--- a/launcher/app/src/main/res/values/strings.xml
++++ b/launcher/app/src/main/res/values/strings.xml
+@@ -59,6 +59,7 @@
+     <string name="wallpaper_applied">Wallpaper changed</string>
+     <string name="wallpaper_theme_default">Theme default</string>
+     <string name="animations_state">Animations: %1$s</string>
++    <string name="live_tv_in_inputs_state">TV channels in Inputs: %1$s</string>
+     <string name="advanced_effects">Advanced effects</string>
+     <string name="advanced_effects_state">Advanced effects: %1$s</string>
+     <string name="open_on_start_label">Open on start</string>
+@@ -115,6 +116,7 @@
+     <string name="library_remove_shortcut">Remove from Home</string>
+     <string name="library_open">Open</string>
+     <string name="library_app_info">App info</string>
++    <string name="tile_uninstall">Uninstall</string>
+     <string name="library_save_failed">Could not save the shortcut</string>
+     <string name="library_recent">New · Add to Home</string>
+     <string name="library_hint_add">Press to add to Home · Hold for options</string>

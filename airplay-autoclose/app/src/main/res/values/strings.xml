@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Помощник ТВ</string>
+    <string name="service_label">AirPlay автозакрытие</string>
+    <string name="service_description">Закрывает AirPlay-приёмник, когда iPhone отключается. Читает только экран приложения AirPlay.</string>
+</resources>
