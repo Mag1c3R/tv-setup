@@ -1,9 +1,13 @@
 # Настройка Android TV по сети: быстрый лаунчер, Happ, AirPlay для iPhone.
 # Запуск на Windows (PowerShell):
 #   irm https://raw.githubusercontent.com/Mag1c3R/tv-setup/main/install.ps1 | iex
-$ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1: с 'Stop' любая строка adb в stderr ("daemon not running; starting now") обрывает скрипт.
+# Ошибки ловятся явно: -ErrorAction Stop у загрузок и Fail у проверок.
+$ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+# PowerShell 5.1 по умолчанию может предлагать TLS 1.0, а GitHub и Google принимают только 1.2+.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Repo      = 'Mag1c3R/tv-setup'
 $Launcher  = 'com.gathin.tvhome'
@@ -19,10 +23,12 @@ try {
 
 # --- adb от Google ---------------------------------------------------------
 Say 'Скачиваю adb (официальный, с dl.google.com)…'
-Invoke-WebRequest 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip' -OutFile "$Work\pt.zip"
-Expand-Archive "$Work\pt.zip" $Work
+try {
+  Invoke-WebRequest 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip' -OutFile "$Work\pt.zip" -UseBasicParsing -ErrorAction Stop
+  Expand-Archive "$Work\pt.zip" $Work -Force -ErrorAction Stop
+} catch { Fail "не удалось скачать adb: $($_.Exception.Message)" }
 $Adb = "$Work\platform-tools\adb.exe"
-& $Adb start-server 2>$null | Out-Null
+& $Adb start-server 2>&1 | Out-Null
 
 # --- подключение -----------------------------------------------------------
 $Ip = (Read-Host 'IP-адрес телевизора (Настройки → Сеть)').Trim()
@@ -31,7 +37,7 @@ if ($Ip -notmatch ':') { $Ip = "${Ip}:5555" }
 Say "Подключаюсь к $Ip. Если на экране телевизора появится «Разрешить отладку?» — нажмите «Разрешить»."
 $state = ''
 for ($i = 0; $i -lt 30; $i++) {
-  & $Adb connect $Ip 2>$null | Out-Null
+  & $Adb connect $Ip 2>&1 | Out-Null
   $state = (& $Adb -s $Ip get-state 2>$null) -join ''
   if ($state -eq 'device') { break }
   Start-Sleep 2
@@ -60,7 +66,7 @@ $Lat = $null; $Lon = $null
 $City = (Read-Host 'Город для фона-неба (Enter — пропустить)').Trim()
 if ($City) {
   try {
-    $g = Invoke-RestMethod ('https://geocoding-api.open-meteo.com/v1/search?count=1&language=ru&format=json&name=' + [uri]::EscapeDataString($City))
+    $g = Invoke-RestMethod ('https://geocoding-api.open-meteo.com/v1/search?count=1&language=ru&format=json&name=' + [uri]::EscapeDataString($City)) -UseBasicParsing -ErrorAction Stop
     if ($g.results) {
       $Lat = $g.results[0].latitude; $Lon = $g.results[0].longitude
       Write-Host "Нашёл: $City ($($g.results[0].admin1)), $Lat, $Lon"
@@ -70,10 +76,12 @@ if ($City) {
 
 # --- скачивание с проверкой sha256 -----------------------------------------
 function Fetch($repo, $name, $file) {
-  $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
+  try { $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -UseBasicParsing -ErrorAction Stop }
+  catch { Fail "нет доступа к GitHub ($repo): $($_.Exception.Message)" }
   $a = $rel.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
   if (-not $a) { Fail "в выпуске $repo нет файла $name" }
-  Invoke-WebRequest $a.browser_download_url -OutFile $file
+  try { Invoke-WebRequest $a.browser_download_url -OutFile $file -UseBasicParsing -ErrorAction Stop }
+  catch { Fail "не удалось скачать ${name}: $($_.Exception.Message)" }
   if ($a.digest -match '^sha256:([0-9a-f]+)$') {
     if ((Get-FileHash $file -Algorithm SHA256).Hash.ToLower() -ne $Matches[1]) { Fail "контрольная сумма $name не совпала: файл повреждён или подменён" }
     Write-Host "  $name — контрольная сумма совпала"
@@ -147,6 +155,6 @@ else { S settings put global adb_enabled 0 2>$null | Out-Null; Write-Host 'От�
 & $Adb disconnect $Ip 2>$null | Out-Null
 
 } finally {
-  if ($Adb) { & $Adb kill-server 2>$null | Out-Null }
+  if ($Adb -and (Test-Path $Adb)) { & $Adb kill-server 2>&1 | Out-Null }
   Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue
 }
