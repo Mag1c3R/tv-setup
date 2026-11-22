@@ -103,6 +103,7 @@ foreach ($f in 'launcher','happ','airplay','autoclose') {
 
 # Лаунчер — главным экраном. Стандартный не отключается.
 S pm grant $Launcher android.permission.ACCESS_FINE_LOCATION 2>$null | Out-Null
+S cmd role add-role-holder android.app.role.HOME $Launcher 2>$null | Out-Null
 S cmd package set-home-activity --user 0 "$Launcher/.MainActivity" 2>$null | Out-Null
 
 # Город — в config.json лаунчера.

@@ -106,6 +106,7 @@ done
 
 # Лаунчер — главным экраном. Стандартный не отключается: вернуть его можно в Настройках → Приложения.
 S pm grant $LAUNCHER android.permission.ACCESS_FINE_LOCATION >/dev/null 2>&1 || true
+S cmd role add-role-holder android.app.role.HOME $LAUNCHER >/dev/null 2>&1 || true
 S cmd package set-home-activity --user 0 $LAUNCHER/.MainActivity >/dev/null 2>&1 || true
 
 # Город — в config.json лаунчера.
